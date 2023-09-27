@@ -1,7 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::thread;
 use crate::api::{Kitchen, Menu};
-mod db;
-fn main() {
+use crate::repository::get_repository;
+
+mod repository;
+mod api;
+
+#[tokio::main]
+async fn main() {
     let mut menus = HashMap::new();
     menus.insert(1, Menu{id: 1, name: String::from("nigiri1")});
     menus.insert(2, Menu{id: 2, name: String::from("nigiri2")});
@@ -14,112 +20,26 @@ fn main() {
     menus.insert(9, Menu{id: 9, name: String::from("nigiri9")});
     menus.insert(10, Menu{id: 10, name: String::from("nigiri10")});
 
-    // let tables = HashSet::from_iter((1..5000));
+
+
+    // let num_tables = 5000;
+    // let tables = HashSet::from_iter(1..num_tables);
+    // //
+    // let mut kitchen = Kitchen{
+    //     tables,
+    //     menus,
+    //     repository: get_repository()};
     //
-    // let kitchen = Kitchen{tables,menus};
-
-
-
-
+    // for customer in 1..num_tables {
+    //     thread::spawn(||{
+    //         // order from kitchen
+    //     });
+    // }
 
 }
 
-pub mod api {
-    use std::borrow::{Borrow, BorrowMut};
-    use std::collections::{HashMap, HashSet};
-    use std::error::Error;
-    use std::fmt;
-    use std::fmt::Formatter;
-    use anyhow::{bail, Result};
-    use serde::{Deserialize, Serialize};
 
 
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Order {
-        pub id: UUID,
-        pub table_id: SmallId,
-        pub menu_id: SmallId,
-        pub created_at: u64,
-        pub processing_time: u64,
-        pub status: OrderStatus
-    }
-
-    #[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
-    pub enum OrderStatus {
-        READY,
-        PROCESSING,
-        CANCELLED
-    }
-
-    pub type UUID = String;
-
-    #[derive(Debug)]
-    pub struct Menu {
-        pub id: SmallId,
-        pub name: String,
-    }
-
-    pub type SmallId = u16;
-
-    #[derive(Debug)]
-    pub struct RequestError  {
-        pub message: String
-    }
-
-    impl RequestError {
-        pub fn new(message: String) -> Self {
-            RequestError {message}
-        }
-    }
-
-    impl fmt::Display for RequestError {
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            write!(f, "RequestError: {}", &self.message)
-        }
-    }
-    impl Error for RequestError {}
-
-    #[derive(Debug)]
-    pub struct Kitchen {
-        pub tables: HashSet<SmallId>,
-        pub menus: HashMap<SmallId, Menu>,
-        // pub db : Box<dyn DB>
-    }
-
-    impl Kitchen {
-        pub fn order_multiple(&self, table_id: SmallId, menu_ids: Vec<SmallId>) -> Result<Vec<Order>> {
-            if !self.is_valid_table(&table_id) || menu_ids.iter().map(|id|self.is_valid_menu(id)).any(|x| !x) {
-                bail!(RequestError::new(String::from("Invalid request")))
-            }
-            // store to DB
-            unimplemented!()
-        }
-
-        pub fn list_order(&self, table_id: SmallId) -> Result<Vec<Order>> {
-            if !self.is_valid_table(&table_id) {
-                bail!(RequestError::new(String::from("Invalid request")))
-            }
-            // fetch from DB
-            unimplemented!();
-        }
-
-        pub fn cancel_order(&self, table_id: SmallId, order_id: UUID) -> Result<bool> {
-            if !self.is_valid_table(&table_id) {
-                bail!(RequestError::new(String::from("Invalid request")))
-            }
-            // store to DB
-            unimplemented!()
-        }
-
-        fn is_valid_menu(&self, menu_id: &SmallId) -> bool {
-            self.menus.contains_key(menu_id)
-        }
-
-        fn is_valid_table(&self, table_id: &SmallId) -> bool {
-            self.tables.contains(table_id)
-        }
-    }
-}
 
 
 

@@ -1,24 +1,37 @@
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::fmt::format;
+use std::fmt::{Debug, format};
 use std::io::Bytes;
 use std::time::{SystemTime, UNIX_EPOCH};
 use redis::{Client, Commands, Connection};
 use crate::api::{Order, SmallId, UUID};
 
+
 // all entries to DB should be valid
-trait DB {
-    fn store_orders(&mut self, table_id: &SmallId, orders: Vec<&Order>) -> Result<()>;
+pub fn get_repository() -> Box<dyn Repository>{
+    Box::new(InMemoryRepository::new())
+}
+
+pub trait Repository {
+    fn name(&self) -> &'static str;
+    fn store_orders(&mut self, table_id: &SmallId, orders: &[Order]) -> Result<()>;
     fn get_orders(&self, table_id: &SmallId) -> Result<Vec<Order>>;
     fn remove_order(&mut self, table_id: &SmallId, order_id: &UUID) -> Result<()>;
 }
 
-struct RedisDB {
+impl Debug for dyn Repository {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+#[derive(Debug)]
+struct RedisRepository {
     client: Client
 }
 
-impl RedisDB {
+impl RedisRepository {
     pub fn new() -> Result<Self> {
         Ok(Self{
             client : Client::open("redis://127.0.0.1:6379/")?
@@ -26,10 +39,13 @@ impl RedisDB {
     }
 }
 
-impl DB for RedisDB {
-    fn store_orders(&mut self, table_id: &SmallId, orders: Vec<&Order>) -> Result<()> {
+impl Repository for RedisRepository {
+    fn name(&self) -> &'static str {
+        "redis"
+    }
+    fn store_orders(&mut self, table_id: &SmallId, orders: &[Order]) -> Result<()> {
         let mut conn = self.client.get_connection()?;
-        for &o in orders.iter() {
+        for o in orders.iter() {
             conn.zadd::<String, &u64, &UUID, bool>(format!("tables:{}", table_id),  &o.id, &o.created_at).unwrap();
             conn.set::<String, String, bool>(format!("tables:{}:{}", table_id, o.id), serde_json::to_string(&o).unwrap());
         }
@@ -55,11 +71,12 @@ impl DB for RedisDB {
     }
 }
 
-struct InMemoryDB {
+#[derive(Debug)]
+struct InMemoryRepository {
     storage: HashMap<SmallId, HashMap<UUID, Order>>
 }
 
-impl InMemoryDB {
+impl InMemoryRepository {
     pub fn new() -> Self {
         Self{
             storage: HashMap::new()
@@ -67,10 +84,13 @@ impl InMemoryDB {
     }
 }
 
-impl DB for InMemoryDB {
-    fn store_orders(&mut self, table_id: &SmallId, orders: Vec<&Order>) ->  Result<()> {
+impl Repository for InMemoryRepository {
+    fn name(&self) -> &'static str {
+        "in_memory"
+    }
+    fn store_orders(&mut self, table_id: &SmallId, orders: &[Order]) ->  Result<()> {
         let table_orders = self.storage.entry(table_id.clone()).or_insert(HashMap::new());
-        orders.iter().for_each(|&o| {table_orders.insert(o.id.clone(), o.clone());});
+        orders.iter().for_each(|o| {table_orders.insert(o.id.clone(), o.clone());});
         Ok(())
     }
     fn get_orders(&self, table_id: &SmallId) -> Result<Vec<Order>> {
@@ -85,21 +105,21 @@ impl DB for InMemoryDB {
 #[cfg(test)]
 mod tests {
     use crate::api::{Order, OrderStatus, SmallId, UUID};
-    use crate::db::{DB, InMemoryDB, RedisDB};
+    use crate::repository::{Repository, InMemoryRepository, RedisRepository};
 
     #[test]
-    fn test_in_memory_db() {
-        let mut db = InMemoryDB::new();
-        db_test(Box::new(db));
+    fn test_in_memory_repo() {
+        let mut repo = InMemoryRepository::new();
+        repo_test(Box::new(repo));
     }
 
     #[test]
-    fn test_redis_db() {
-        let mut db = RedisDB::new().unwrap();
-        db_test(Box::new(db));
+    fn test_redis_repo() {
+        let mut repo = RedisRepository::new().unwrap();
+        repo_test(Box::new(repo));
     }
 
-    fn db_test(mut db: Box<dyn DB>){
+    fn repo_test(mut repo: Box<dyn Repository>){
         let table_id = 1 as SmallId;
         let order = Order {
             id: String::from("test"),
@@ -109,9 +129,10 @@ mod tests {
             processing_time: 10,
             status: OrderStatus::PROCESSING
         };
-        assert_eq!(db.store_orders(&table_id, vec![&order]).unwrap(), ());
-        assert_eq!(db.get_orders(&table_id).unwrap().iter().collect::<Vec<&Order>>(), vec![&order]);
-        assert_eq!(db.remove_order(&table_id, &order.id).unwrap(), ());
-        assert_eq!(db.get_orders(&table_id).unwrap(), vec![]);
+        let orders = vec![order.clone()];
+        assert_eq!(repo.store_orders(&table_id, &orders[..]).unwrap(), ());
+        assert_eq!(repo.get_orders(&table_id).unwrap(), orders[..]);
+        assert_eq!(repo.remove_order(&table_id, &order.id).unwrap(), ());
+        assert_eq!(repo.get_orders(&table_id).unwrap(), vec![]);
     }
 }
