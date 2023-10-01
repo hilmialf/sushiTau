@@ -18,7 +18,6 @@ Multiple "tablets" carried by restaurant staff to take orders.  These will send 
 to add, remove, and query menu items for each table.  Please make this as simple as possible.
 
 ## Requirements
-
 * The client (the restaurant staff “devices” making the requests) MUST be able to: add one or more items with a
   table number, remove an item for a table, and query the items still remaining for a table.
 * The application MUST, upon creation request, store the item, the table number, and how long the item will take to cook.

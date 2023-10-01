@@ -1,0 +1,2 @@
+[env]
+RUSTFLAGS = "--cfg uuid_unstable"

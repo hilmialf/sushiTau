@@ -2,22 +2,27 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt::{Debug, format};
-use std::io::Bytes;
+use std::str::Bytes;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use redis::{Client, Commands, Connection};
-use crate::api::{Order, SmallId, UUID};
+use uuid::Uuid;
+use crate::api::{Order, SmallId};
 
 
+pub type Db = Arc<Mutex<Box<dyn Repository + Send>>>;
 // all entries to DB should be valid
-pub fn get_repository() -> Box<dyn Repository>{
-    Box::new(InMemoryRepository::new())
+pub fn get_repository() -> Db {
+    // Arc::new(Mutex::new(Box::new(InMemoryRepository::new())))
+    Arc::new(Mutex::new(Box::new(RedisRepository::new().unwrap())))
+
 }
 
 pub trait Repository {
     fn name(&self) -> &'static str;
     fn store_orders(&mut self, table_id: &SmallId, orders: &[Order]) -> Result<()>;
     fn get_orders(&self, table_id: &SmallId) -> Result<Vec<Order>>;
-    fn remove_order(&mut self, table_id: &SmallId, order_id: &UUID) -> Result<()>;
+    fn remove_order(&mut self, table_id: &SmallId, order_id: &str) -> Result<()>;
 }
 
 impl Debug for dyn Repository {
@@ -44,10 +49,11 @@ impl Repository for RedisRepository {
         "redis"
     }
     fn store_orders(&mut self, table_id: &SmallId, orders: &[Order]) -> Result<()> {
+        println!("storing orders to repository");
         let mut conn = self.client.get_connection()?;
         for o in orders.iter() {
-            conn.zadd::<String, &u64, &UUID, bool>(format!("tables:{}", table_id),  &o.id, &o.created_at).unwrap();
-            conn.set::<String, String, bool>(format!("tables:{}:{}", table_id, o.id), serde_json::to_string(&o).unwrap());
+            conn.zadd::<String, &u64, &str, bool>(format!("tables:{}", table_id),  &o.id, &o.created_at).unwrap();
+            conn.set::<String, String, bool>(format!("tables:{}:{}", table_id, &o.id), serde_json::to_string(&o).unwrap());
         }
         Ok(())
     }
@@ -56,16 +62,16 @@ impl Repository for RedisRepository {
         let mut conn = self.client.get_connection()?;
         let order_ids = conn.zrange::<String, Vec<String>>(format!("tables:{}", table_id),0, -1).unwrap();
         let orders = order_ids.iter().map(|id| {
-            let order = serde_json::from_str::<Order>(&conn.get::<String, String>(format!("tables:{}:{}", table_id, id)).unwrap()).unwrap();
+            let mut order = serde_json::from_str::<Order>(&conn.get::<String, String>(format!("tables:{}:{}", table_id, id)).unwrap()).unwrap();
             order
         }).collect();
         Ok(orders)
 
     }
 
-    fn remove_order(&mut self, table_id: &SmallId, order_id: &UUID) -> Result<()> {
+    fn remove_order(&mut self, table_id: &SmallId, order_id: &str) -> Result<()> {
         let mut conn = self.client.get_connection()?;
-        conn.zrem::<String, &String, ()>(format!("tables:{}", table_id), order_id).unwrap();
+        conn.zrem::<String, &str, ()>(format!("tables:{}", table_id), order_id).unwrap();
         conn.del::<String, ()>(format!("tables:{}:{}", table_id, order_id)).unwrap();
         Ok(())
     }
@@ -73,7 +79,7 @@ impl Repository for RedisRepository {
 
 #[derive(Debug)]
 struct InMemoryRepository {
-    storage: HashMap<SmallId, HashMap<UUID, Order>>
+    storage: HashMap<SmallId, HashMap<String, Order>>
 }
 
 impl InMemoryRepository {
@@ -96,7 +102,7 @@ impl Repository for InMemoryRepository {
     fn get_orders(&self, table_id: &SmallId) -> Result<Vec<Order>> {
         Ok(self.storage.get(table_id).unwrap_or(&HashMap::new()).into_iter().map(|e|e.1.clone()).collect())
     }
-    fn remove_order(&mut self, table_id: &SmallId, order_id: &UUID) -> Result<()> {
+    fn remove_order(&mut self, table_id: &SmallId, order_id: &str) -> Result<()> {
         self.storage.entry(table_id.clone()).and_modify(|table_orders| { table_orders.remove(order_id); });
         Ok(())
     }
@@ -104,7 +110,8 @@ impl Repository for InMemoryRepository {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::{Order, OrderStatus, SmallId, UUID};
+    use uuid::Uuid;
+    use crate::api::{Order, OrderStatus, SmallId};
     use crate::repository::{Repository, InMemoryRepository, RedisRepository};
 
     #[test]
@@ -122,7 +129,7 @@ mod tests {
     fn repo_test(mut repo: Box<dyn Repository>){
         let table_id = 1 as SmallId;
         let order = Order {
-            id: String::from("test"),
+            id: Uuid::now_v7().to_string(),
             table_id: 1,
             menu_id: 1,
             created_at: 0,
