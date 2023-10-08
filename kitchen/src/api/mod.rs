@@ -3,14 +3,18 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fmt::Formatter;
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::process::Output;
+use std::sync::{Arc};
+use tokio::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::repository::{Db, Repository};
+use crate::repository::{Repository};
 use uuid::{Timestamp, Uuid};
 
-pub fn build_kitchen(repository: Db) -> Kitchen {
+pub async fn build_kitchen(repository: impl Repository + Clone + Send + Sync) -> Kitchen<impl Repository + Clone + Send> {
     let mut initial_menus = vec![
         "Tuna",
         "Lean Tuna",
@@ -49,17 +53,14 @@ pub fn build_kitchen(repository: Db) -> Kitchen {
         "Seared Wagyu Beef",
         "Imitaion Crab Meat Tempura"
     ];
-    let mut menus = Arc::new(Mutex::new(HashMap::new()));
+    let mut menus = HashMap::new();
     for (i , menu) in initial_menus.iter().enumerate() {
-        menus.lock().unwrap().insert(i.clone() as SmallId, Menu{id: i as SmallId, name: String::from(*menu)});
+        menus.insert(i.clone() as SmallId, Menu{id: i as SmallId, name: String::from(*menu)});
     }
 
     let num_tables = 5000;
-    let tables = Arc::new(Mutex::new(HashSet::from_iter(1..num_tables)));
-    Kitchen{
-        tables: tables.clone(),
-        menus: menus.clone(),
-        repository: repository.clone()}
+    let tables = HashSet::from_iter(1..num_tables);
+    Kitchen::new(Arc::new(tables),Arc::new(menus), repository.clone())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,16 +120,50 @@ impl Error for RequestError {}
 // = note: this error originates in the derive macro `Debug` (in Nightly builds, run with -Z macro-backtrace for more info)
 // #[derive(Debug)]
 #[derive(Clone)]
-pub struct Kitchen {
-    pub tables: Arc<Mutex<HashSet<SmallId>>>,
-    pub menus: Arc<Mutex<HashMap<SmallId, Menu>>>,
-    pub repository : Arc<Mutex<Box<dyn Repository + Send>>>
+pub struct Kitchen<Repo: Clone> {
+    pub tables: Arc<HashSet<SmallId>>,
+    pub menus: Arc<HashMap<SmallId, Menu>>,
+    pub repository : Repo
 }
 
-impl Kitchen {
-    pub fn order_multiple(&mut self, table_id: &SmallId, menu_ids: &[SmallId]) -> Result<Vec<Order>> {
-        if !self.is_valid_table(&table_id) || menu_ids.iter().map(|id|self.is_valid_menu(id)).any(|x| !x) {
-            bail!(RequestError::new(String::from("Invalid request")))
+#[async_trait]
+pub trait KitchenApi {
+    async fn order_multiple(&mut self, table_id: &SmallId, menu_ids: &[SmallId]) -> Result<Vec<Order>>;
+    async fn list_order(&self, table_id: SmallId) -> Result<Vec<Order>>;
+    async fn cancel_order(&mut self, table_id: SmallId, order_id: String) -> Result<bool>;
+}
+
+impl<Repo: Repository + Clone + Send + Sync> Kitchen<Repo> {
+    fn new(tables: Arc<HashSet<SmallId>>, menus: Arc<HashMap<SmallId, Menu>>, repository: Repo) -> Self{
+        Kitchen{ tables, menus, repository }
+    }
+
+    fn is_valid_menu(&self, menu_id: &SmallId) -> bool {
+        self.menus.contains_key(menu_id)
+    }
+
+    fn is_valid_menus(&self, menu_ids: &[SmallId]) -> bool {
+        menu_ids.iter().map(|id|{
+            self.menus.contains_key(id)
+        }).all(|x|x)
+    }
+
+    fn is_valid_table(&self, table_id: &SmallId) -> bool {
+        self.tables.contains(table_id)
+    }
+}
+
+#[async_trait]
+impl<Repo: Repository + Clone + Send + Sync> KitchenApi for Kitchen<Repo> {
+    async fn order_multiple(&mut self, table_id: &SmallId, menu_ids: &[SmallId]) -> Result<Vec<Order>> {
+        let is_valid_table = self.is_valid_table(&table_id);
+        if !is_valid_table {
+            println!("{}", table_id);
+            bail!(RequestError::new(String::from("table is invalid")))
+        }
+        let is_valid_menus = self.is_valid_menus(menu_ids);
+        if !is_valid_menus {
+            bail!(RequestError::new(String::from("menu is invalid")))
         }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let orders = menu_ids.into_iter().map(|menu_id| {
@@ -143,32 +178,25 @@ impl Kitchen {
         }).collect::<Vec<Order>>();
         // store to Repository
         println!("{:?}", orders);
-        println!("{:?}", self.repository.lock().unwrap().name());
-        self.repository.lock().unwrap().store_orders(&table_id, orders.as_slice()).unwrap();
+        println!("{:?}", self.repository.name());
+        self.repository.store_orders(&table_id, orders.as_slice()).await;
         Ok(orders)
     }
 
-    pub fn list_order(&self, table_id: SmallId) -> Result<Vec<Order>> {
-        if !self.is_valid_table(&table_id) {
+    async fn list_order(&self, table_id: SmallId) -> Result<Vec<Order>> {
+        let is_valid_table = self.is_valid_table(&table_id);
+        if !is_valid_table {
             bail!(RequestError::new(String::from("Invalid request")))
         }
-        self.repository.lock().unwrap().get_orders(&table_id)
+        self.repository.get_orders(&table_id).await
     }
 
-    pub fn cancel_order(&self, table_id: SmallId, order_id: String) -> Result<bool> {
+    async fn cancel_order(&mut self, table_id: SmallId, order_id: String) -> Result<bool> {
         if !self.is_valid_table(&table_id) {
             bail!(RequestError::new(String::from("Invalid request")))
         }
-        let res = self.repository.lock().unwrap().remove_order(&table_id, &order_id).unwrap();
+        self.repository.remove_order(&table_id, &order_id).await;
 
         Ok(true)
-    }
-
-    fn is_valid_menu(&self, menu_id: &SmallId) -> bool {
-        self.menus.lock().unwrap().contains_key(menu_id)
-    }
-
-    fn is_valid_table(&self, table_id: &SmallId) -> bool {
-        self.tables.lock().unwrap().contains(table_id)
     }
 }
