@@ -9,6 +9,7 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>>{
+    env_logger::init();
     let menus = reqwest::get("http://localhost:3030/menus")
         .await?
         .json::<Vec<(usize, String)>>()
@@ -54,7 +55,7 @@ async fn run_client(table_id: SmallId, menus: Arc<Vec<(usize, String)>>) -> Resu
         .await?;
     assert_eq!(&submitted_orders.len(), &order_menu_ids.len());
     // pick random order to cancel
-    let cancel_order_num = rand::thread_rng().gen_range(0..submitted_orders.len() as u64);
+    let cancel_order_num = rand::thread_rng().gen_range(1..submitted_orders.len() as u64);
     for _ in 0..cancel_order_num {
         let cancel_order: Order = submitted_orders.pop().unwrap();
         let resp = client.delete(format!("http://localhost:3030/orders/{}/{}", table_id, cancel_order.id))
